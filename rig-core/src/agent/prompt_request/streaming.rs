@@ -228,10 +228,17 @@ where
 
                 if let Some(ref hook) = self.hook {
                     let reader = chat_history.read().await;
-                    let prompt = reader.last().cloned().expect("there should always be at least one message in the chat history");
-                    let chat_history_except_last = reader[..reader.len() - 1].to_vec();
+                    // On first iteration, history may be empty - use current_prompt instead
+                    let (prompt_for_hook, history_for_hook) = if reader.is_empty() {
+                        (current_prompt.clone(), vec![])
+                    } else {
+                        let prompt = reader.last().cloned().expect("checked non-empty above");
+                        let history = reader[..reader.len() - 1].to_vec();
+                        (prompt, history)
+                    };
+                    drop(reader);
 
-                    hook.on_completion_call(&prompt, &chat_history_except_last, cancel_signal.clone())
+                    hook.on_completion_call(&prompt_for_hook, &history_for_hook, cancel_signal.clone())
                     .await;
 
                     if cancel_signal.is_cancelled() {

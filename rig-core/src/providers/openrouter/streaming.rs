@@ -128,6 +128,10 @@ where
 
         request.additional_params = Some(params);
 
+        // Serialize request for telemetry before converting to bytes
+        let tools_json = serde_json::to_string(&request.tools).ok();
+        let body_json = serde_json::to_string(&request).ok();
+
         let body = serde_json::to_vec(&request)?;
 
         let req = self
@@ -136,22 +140,31 @@ where
             .body(body)
             .map_err(|x| CompletionError::HttpError(x.into()))?;
 
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat_streaming",
-                gen_ai.operation.name = "chat_streaming",
-                gen_ai.provider.name = "openrouter",
-                gen_ai.request.model = self.model,
-                gen_ai.system_instructions = preamble,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        // Always create our own span with all fields declared (matching non-streaming)
+        let span = info_span!(
+            target: "rig::completions",
+            "chat_streaming",
+            gen_ai.operation.name = "chat_streaming",
+            gen_ai.provider.name = "openrouter",
+            gen_ai.request.model = self.model,
+            gen_ai.system_instructions = preamble,
+            gen_ai.request.tools = tracing::field::Empty,
+            gen_ai.request.body = tracing::field::Empty,
+            gen_ai.response.id = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            gen_ai.response.content = tracing::field::Empty,
+            gen_ai.response.tool_calls = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+        );
+
+        // Record request tools and full body
+        if let Some(ref tools) = tools_json {
+            span.record("gen_ai.request.tools", tools.as_str());
+        }
+        if let Some(ref body) = body_json {
+            span.record("gen_ai.request.body", body.as_str());
+        }
 
         tracing::Instrument::instrument(
             send_compatible_streaming_request(self.client.clone(), req),
@@ -172,10 +185,18 @@ where
     // Build the request with proper headers for SSE
     let mut event_source = GenericEventSource::new(http_client, req);
 
+    // Clone span for use inside stream (original used for .instrument())
+    let inner_span = span.clone();
+
     let stream = stream! {
+        let span = inner_span;
         // Accumulate tool calls by index while streaming
         let mut tool_calls: HashMap<usize, ToolCall> = HashMap::new();
         let mut final_usage = None;
+        // Accumulate response text for telemetry
+        let mut accumulated_response = String::new();
+        // Accumulate completed tool calls for telemetry
+        let mut completed_tool_calls: Vec<serde_json::Value> = Vec::new();
 
         while let Some(event_result) = event_source.next().await {
             match event_result {
@@ -268,6 +289,7 @@ where
 
                     // Streamed text content
                     if let Some(content) = &delta.content && !content.is_empty() {
+                        accumulated_response.push_str(content);
                         yield Ok(streaming::RawStreamingChoice::Message(content.clone()));
                     }
 
@@ -279,6 +301,12 @@ where
                     // Finish reason
                     if let Some(finish_reason) = &choice.finish_reason && *finish_reason == FinishReason::ToolCalls {
                         for (_idx, tool_call) in tool_calls.into_iter() {
+                            // Accumulate for telemetry
+                            completed_tool_calls.push(serde_json::json!({
+                                "id": tool_call.id,
+                                "name": tool_call.function.name,
+                                "arguments": tool_call.function.arguments,
+                            }));
                             yield Ok(streaming::RawStreamingChoice::ToolCall {
                                 name: tool_call.function.name,
                                 id: tool_call.id,
@@ -305,12 +333,28 @@ where
 
         // Flush any accumulated tool calls (that weren't emitted as ToolCall earlier)
         for (_idx, tool_call) in tool_calls.into_iter() {
+            // Accumulate for telemetry
+            completed_tool_calls.push(serde_json::json!({
+                "id": tool_call.id,
+                "name": tool_call.function.name,
+                "arguments": tool_call.function.arguments,
+            }));
             yield Ok(streaming::RawStreamingChoice::ToolCall {
                 name: tool_call.function.name,
                 id: tool_call.id,
                 arguments: tool_call.function.arguments,
                 call_id: None,
             });
+        }
+
+        // Record accumulated response to telemetry span
+        if !accumulated_response.is_empty() {
+            span.record("gen_ai.response.content", &accumulated_response);
+        }
+        if !completed_tool_calls.is_empty() {
+            if let Ok(tool_calls_json) = serde_json::to_string(&completed_tool_calls) {
+                span.record("gen_ai.response.tool_calls", &tool_calls_json);
+            }
         }
 
         // Final response with usage

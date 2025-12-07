@@ -318,7 +318,7 @@ pub(super) struct OpenrouterCompletionRequest {
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<crate::providers::openai::completion::ToolDefinition>,
+    pub(super) tools: Vec<crate::providers::openai::completion::ToolDefinition>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     tool_choice: Option<crate::providers::openai::completion::ToolChoice>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]

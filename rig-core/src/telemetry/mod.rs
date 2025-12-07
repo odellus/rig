@@ -48,6 +48,18 @@ pub trait SpanCombinator {
     fn record_model_output<T>(&self, messages: &T)
     where
         T: Serialize;
+
+    fn record_tools<T>(&self, tools: &T)
+    where
+        T: Serialize;
+
+    fn record_full_request<T>(&self, request: &T)
+    where
+        T: Serialize;
+
+    fn record_full_response<T>(&self, response: &T)
+    where
+        T: Serialize;
 }
 
 impl SpanCombinator for tracing::Span {
@@ -108,5 +120,47 @@ impl SpanCombinator for tracing::Span {
             .expect("Serializing a Rust type to JSON should not break");
 
         self.record("gen_ai.output.messages", output_as_json_string);
+    }
+
+    fn record_tools<T>(&self, tools: &T)
+    where
+        T: Serialize,
+    {
+        if self.is_disabled() {
+            return;
+        }
+
+        let tools_as_json_string = serde_json::to_string(tools)
+            .expect("Serializing a Rust type to JSON should not break");
+
+        self.record("gen_ai.request.tools", tools_as_json_string);
+    }
+
+    fn record_full_request<T>(&self, request: &T)
+    where
+        T: Serialize,
+    {
+        if self.is_disabled() {
+            return;
+        }
+
+        let request_as_json_string = serde_json::to_string(request)
+            .expect("Serializing a Rust type to JSON should not break");
+
+        self.record("gen_ai.request.body", request_as_json_string);
+    }
+
+    fn record_full_response<T>(&self, response: &T)
+    where
+        T: Serialize,
+    {
+        if self.is_disabled() {
+            return;
+        }
+
+        let response_as_json_string = serde_json::to_string(response)
+            .expect("Serializing a Rust type to JSON should not break");
+
+        self.record("gen_ai.response.body", response_as_json_string);
     }
 }

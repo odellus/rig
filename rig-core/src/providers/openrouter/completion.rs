@@ -467,22 +467,26 @@ where
             );
         }
 
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat",
-                gen_ai.operation.name = "chat",
-                gen_ai.provider.name = "openrouter",
-                gen_ai.request.model = self.model,
-                gen_ai.system_instructions = preamble,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        // Always create our own span with all fields declared
+        let span = info_span!(
+            target: "rig::completions",
+            "chat",
+            gen_ai.operation.name = "chat",
+            gen_ai.provider.name = "openrouter",
+            gen_ai.request.model = self.model,
+            gen_ai.system_instructions = preamble,
+            gen_ai.request.tools = tracing::field::Empty,
+            gen_ai.request.body = tracing::field::Empty,
+            gen_ai.response.id = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            gen_ai.response.body = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+        );
+
+        // Serialize request for telemetry
+        let tools_json = serde_json::to_string(&request.tools).ok();
+        let body_json = serde_json::to_string(&request).ok();
 
         let body = serde_json::to_vec(&request)?;
 
@@ -493,6 +497,14 @@ where
             .map_err(|x| CompletionError::HttpError(x.into()))?;
 
         async move {
+            // Record request tools and full body (now inside the instrumented span)
+            let span = tracing::Span::current();
+            if let Some(ref tools) = tools_json {
+                span.record("gen_ai.request.tools", tools.as_str());
+            }
+            if let Some(ref body) = body_json {
+                span.record("gen_ai.request.body", body.as_str());
+            }
             let response = self.client.send::<_, Bytes>(req).await?;
             let status = response.status();
             let response_body = response.into_body().into_future().await?.to_vec();
@@ -504,6 +516,9 @@ where
                         span.record_token_usage(&response.usage);
                         span.record("gen_ai.response.id", &response.id);
                         span.record("gen_ai.response.model_name", &response.model);
+                        if let Ok(body_json) = serde_json::to_string(&response) {
+                            span.record("gen_ai.response.body", body_json.as_str());
+                        }
 
                         tracing::debug!(target: "rig::completions",
                             "OpenRouter response: {response:?}");

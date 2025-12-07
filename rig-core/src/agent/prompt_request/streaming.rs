@@ -283,14 +283,21 @@ where
                                 last_text_response = String::new();
                                 is_text_response = true;
                             }
-                            last_text_response.push_str(&text.text);
+                            // Clone the text chunk before yielding (text will be moved)
+                            let text_delta = text.text.clone();
+                            last_text_response.push_str(&text_delta);
+
+                            // IMPORTANT: Yield the text BEFORE checking cancellation
+                            // This ensures the consumer can accumulate all streamed text
+                            // even when cancelled mid-stream
+                            yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::Text(text)));
+
                             if let Some(ref hook) = self.hook {
-                                hook.on_text_delta(&text.text, &last_text_response, cancel_signal.clone()).await;
+                                hook.on_text_delta(&text_delta, &last_text_response, cancel_signal.clone()).await;
                                 if cancel_signal.is_cancelled() {
                                     yield Err(StreamingError::Prompt(PromptError::prompt_cancelled(chat_history.read().await.to_vec()).into()));
                                 }
                             }
-                            yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::Text(text)));
                             did_call_tool = false;
                         },
                         Ok(StreamedAssistantContent::ToolCall(tool_call)) => {
